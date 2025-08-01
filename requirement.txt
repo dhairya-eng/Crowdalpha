@@ -1,0 +1,7 @@
+streamlit
+yfinance
+praw
+python-dotenv
+openai
+requests
+beautifulsoup4
