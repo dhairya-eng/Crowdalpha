@@ -1,5 +1,4 @@
 # terminal_tab.py - CrowdAlpha | Ticker Terminal View
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd

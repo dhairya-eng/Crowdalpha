@@ -1,4 +1,4 @@
-# CrowdAlpha - MVP Backend (OpenRouter + Mistral + LLM Caching)
+# crowdalpha.py - CrowdAlpha | Parallel Reddit Sentiment with Groq + OpenRouter Fallback
 
 import praw
 import re
@@ -6,151 +6,173 @@ import time
 import json
 import os
 import hashlib
+import concurrent.futures
 from collections import defaultdict
-from openai import OpenAI
+from dotenv import load_dotenv
+import openai
 
-# --- CONFIGURATION ---
-REDDIT_CLIENT_ID = 'tD7Dcx6DzND4BituUe3LWA'
-REDDIT_CLIENT_SECRET = 'N7z-THlJQOc19wWTnZXXhbv7KohxKw'
-REDDIT_USER_AGENT = 'CrowdAlphaBot/0.1'
-OPENROUTER_API_KEY = "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"
-CACHE_FILE = "llm_cache.json"
+# --- Load Environment ---
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# --- INIT ---
+# --- Reddit Config ---
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "CrowdAlphaBot/0.2")
+
 reddit = praw.Reddit(
     client_id=REDDIT_CLIENT_ID,
     client_secret=REDDIT_CLIENT_SECRET,
     user_agent=REDDIT_USER_AGENT
 )
 
-client = OpenAI(
-    api_key=OPENROUTER_API_KEY,
-    base_url="https://openrouter.ai/api/v1"
-)
+# --- LLM Clients ---
+groq_client = openai.OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+openrouter_client = openai.OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
 
-# --- Load or Init Cache ---
-if os.path.exists(CACHE_FILE):
-    with open(CACHE_FILE, "r") as f:
-        llm_cache = json.load(f)
-else:
-    llm_cache = {}
+# --- Cache File ---
+CACHE_FILE = "llm_cache.json"
+llm_cache = json.load(open(CACHE_FILE)) if os.path.exists(CACHE_FILE) else {}
 
-# --- Regex to Extract Potential Tickers (e.g., $TSLA, NVDA) ---
-TICKER_REGEX = r'\b[A-Z]{2,5}\b|\$[A-Z]{1,5}\b'
+# --- Regex for Tickers ---
+TICKER_REGEX = r"\b[A-Z]{2,5}\b|\$[A-Z]{1,5}\b"
 
-# --- Hash helper ---
-def get_post_hash(text):
+
+def get_post_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-# --- Scrape Top Posts ---
-def fetch_reddit_posts(subreddit="stocks", limit=10):
-    posts = []
-    for submission in reddit.subreddit(subreddit).hot(limit=limit):
-        if not submission.stickied and len(submission.title) > 15:
-            posts.append({
-                "title": submission.title,
-                "selftext": submission.selftext,
-                "url": submission.url
-            })
-    return posts
+def extract_tickers(text):
+    tickers = re.findall(TICKER_REGEX, text.upper())
+    return list(set([t.replace("$", "") for t in tickers if len(t) <= 5]))
 
 
-# --- LLM Extraction with Caching using Mistral ---
+def call_llm(prompt: str):
+    """Try Groq first, then fallback to OpenRouter."""
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print("Groq failed, fallback to OpenRouter:", e)
+        try:
+            response = openrouter_client.chat.completions.create(
+                model="meta-llama/llama-3-8b-instruct:free",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print("Both LLM calls failed:", e)
+            return '{"ticker": [], "sentiment": "neutral", "reason": ["LLM error"]}'
+
+
 def extract_thesis_from_post(text):
-    prompt = f"""
-You are a financial analyst AI. Read the Reddit post below and extract a JSON object with:
-- A list of stock tickers mentioned (e.g., [\"TSLA\", \"NVDA\"])
-- A sentiment (bullish, bearish, neutral)
-- A few short reasons explaining the sentiment
-
-Reddit Post:
-\"\"\"{text}\"\"\"
-
-Respond ONLY with valid JSON in this format:
-{{
-  "ticker": [...],
-  "sentiment": "bullish/bearish/neutral",
-  "reason": ["...", "..."]
-}}
     """
-
+    Analyze Reddit post to extract ticker, sentiment, and reasons.
+    Uses cache to avoid repeated calls.
+    """
     post_id = get_post_hash(text)
     if post_id in llm_cache:
         return llm_cache[post_id]
 
-    try:
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3-8b-instruct:free",
-            extra_headers={
-                "HTTP-Referer": "https://yourappname.streamlit.app",
-                "X-Title": "CrowdAlpha"
-            },
-            messages=[
-                {"role": "system", "content": "You are a financial analyst assistant."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        raw = response.choices[0].message.content.strip()
-        print("\n[OpenRouter RAW OUTPUT]:", raw)
+    prompt = f"""
+    You are a financial analyst AI. Read the Reddit post below and extract JSON:
+    {{
+      "ticker": ["TICKER1","TICKER2"],
+      "sentiment": "bullish/bearish/neutral",
+      "reason": ["reason1","reason2"]
+    }}
+    Post:
+    \"\"\"{text}\"\"\"
+    """
 
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
+    raw = call_llm(prompt)
+
+    # Extract JSON safely
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        try:
             result = json.loads(match.group(0))
-            llm_cache[post_id] = result
-            with open(CACHE_FILE, "w") as f:
-                json.dump(llm_cache, f, indent=2)
-            return result
+        except json.JSONDecodeError:
+            result = {"ticker": [], "sentiment": "neutral", "reason": ["JSON parse error"]}
+    else:
+        result = {"ticker": [], "sentiment": "neutral", "reason": ["Invalid LLM output"]}
 
-        raise ValueError("No valid JSON object found in LLM output")
+    # Cache result
+    llm_cache[post_id] = result
+    json.dump(llm_cache, open(CACHE_FILE, "w"), indent=2)
+    return result
 
+
+def fetch_reddit_posts(subreddit="stocks", limit=10):
+    posts = []
+    try:
+        for submission in reddit.subreddit(subreddit).hot(limit=limit):
+            if not submission.stickied and len(submission.title) > 15:
+                posts.append({
+                    "title": submission.title,
+                    "selftext": submission.selftext or "",
+                    "url": submission.url
+                })
     except Exception as e:
-        print("OpenRouter Error:", e)
-        return {
-            "ticker": [],
-            "sentiment": "neutral",
-            "reason": ["LLM error or invalid response format"]
+        print(f"Error fetching Reddit posts: {e}")
+    return posts
+
+
+def process_post(post):
+    """Process one Reddit post (parallel safe)."""
+    full_text = post['title'] + "\n" + post['selftext']
+    llm_result = extract_thesis_from_post(full_text)
+    tickers = llm_result.get("ticker") or extract_tickers(full_text)
+    if not tickers:
+        tickers = ["UNCATEGORIZED"]
+
+     # Filter out "unknown" or placeholder reasons
+    reasons = [
+        r for r in llm_result.get("reason", [])
+        if r and r.lower() not in ["unknown", "n/a", "none"]
+    ]
+    summary = "; ".join(reasons) if reasons else "No clear reason provided by AI."
+
+    for ticker in tickers:
+        yield ticker, {
+            "title": post['title'],
+            "selftext": post['selftext'],
+            "url": post['url'],
+            "summary": summary,
+            "sentiment": llm_result.get("sentiment", "neutral")
         }
 
-# --- Extract Tickers from Text (fallback or for cross-checking) ---
-def extract_tickers(text):
-    tickers = re.findall(TICKER_REGEX, text.upper())
-    clean = [t.replace('$', '') for t in tickers if len(t.replace('$', '')) <= 5]
-    return list(set(clean))
 
-
-# --- Group Posts by Ticker ---
 def group_posts_by_ticker(posts):
     grouped = defaultdict(list)
-    for post in posts:
-        full_text = post['title'] + "\n" + post['selftext']
-        llm_result = extract_thesis_from_post(full_text)
-        time.sleep(60)# prevent rate limit bursts
-
-        tickers = llm_result.get("ticker") or extract_tickers(full_text)
-        if not tickers:
-            tickers = ["UNCATEGORIZED"]
-
-        for ticker in tickers:
-            post["summary"] = "; ".join(llm_result.get("reason", []))
-            post["sentiment"] = llm_result.get("sentiment", "neutral")
-            grouped[ticker].append(post)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(process_post, post) for post in posts]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                for ticker, processed_post in future.result():
+                    grouped[ticker].append(processed_post)
+            except Exception as e:
+                print(f"Error processing post: {e}")
     return grouped
 
 
-# --- Display Grouped Posts ---
 def display_grouped_posts(grouped):
+    """For CLI testing (optional)."""
     for ticker, posts in grouped.items():
         print(f"\n=== {ticker} ===")
         for post in posts:
             print(f"- {post['title'][:100]}")
 
 
-# --- Run Script ---
 def run():
     posts = fetch_reddit_posts()
     grouped = group_posts_by_ticker(posts)
     display_grouped_posts(grouped)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run()

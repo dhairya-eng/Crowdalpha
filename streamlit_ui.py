@@ -1,5 +1,4 @@
 # streamlit_ui.py - Reddit Feed Tab (modularized)
-
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -17,7 +16,9 @@ def render_reddit_tab():
 
     # --- Sidebar Ticker Filter ---
     st.sidebar.title("📊 Filter and Insights")
-    selected_ticker = st.sidebar.selectbox("Choose a stock ticker:", tickers)
+    selected_ticker = st.sidebar.selectbox("Search or select a stock ticker:", 
+    options=tickers,
+    index=0)
 
     # --- Ticker Frequency Bar Chart ---
     ticker_counts = {k: len(v) for k, v in grouped.items() if k != "UNCATEGORIZED"}
@@ -63,3 +64,4 @@ def render_reddit_tab():
                 st.markdown(summary or "*No summary available.*")
 
         st.markdown("---")
+

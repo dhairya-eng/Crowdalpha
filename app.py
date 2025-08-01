@@ -20,6 +20,6 @@ elif tab == "News Flow":
     import chat_tab 
 elif tab == "AI Chat":
     chat_tab.render_chat_tab()  
-elif tab == "Compare Stocks":
+elif tab == "Compare":
     compare_tab.render_compare_tab()
 
