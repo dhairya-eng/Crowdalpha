@@ -1,3 +1,21 @@
-.env
-llm_cache.json
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# Environment
+.env
+.venv/
+venv/
+
+# Streamlit cache
+.streamlit/
+
+# LLM Cache
+llm_cache.json
+
+# OS files
+.DS_Store
+Thumbs.db
