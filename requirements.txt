@@ -1,8 +1,10 @@
 streamlit
 yfinance
+pandas
 praw
 python-dotenv
 openai
 requests
 beautifulsoup4
 feedparser
+matplotlib
